@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pastecmd — copy &amp; paste between devices</title>
+<meta name="description" content="Copy and paste text between your phone and computer. No install, no account, end-to-end encrypted.">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>paste<span class="accent">cmd</span></h1>
+  <p class="tagline">Copy &amp; paste between your phone and computer. Nothing to install.</p>
+</header>
+
+<main>
+  <div class="card hidden" id="qr-card">
+    <div id="qr-body">
+      <div id="qr-holder"></div>
+      <p class="hint">Scan with your phone camera to link it to this page.</p>
+      <button id="copy-link">Copy link</button>
+    </div>
+    <button id="qr-toggle" class="linklike hidden">Show QR code</button>
+  </div>
+
+  <div class="card hidden" id="clip-card">
+    <div class="top-row">
+      <span id="status"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+      <label class="switch hidden" id="allow-more-wrap">
+        <span>Allow Multiple Users</span>
+        <input type="checkbox" id="allow-more">
+        <span class="lever"></span>
+      </label>
+    </div>
+    <textarea id="clip" placeholder="Type or paste here — it appears on the other device instantly." spellcheck="false"></textarea>
+    <div class="btn-row">
+      <button class="primary" id="copy-btn">Copy</button>
+      <button id="paste-btn">Paste from clipboard</button>
+      <button id="file-btn">Send a file</button>
+      <button id="clear-btn">Clear</button>
+    </div>
+    <p class="hint">&hellip;or drag a file onto the page, or paste a screenshot. Up to 50&nbsp;MB.</p>
+    <div id="transfers"></div>
+    <input type="file" id="file-input" multiple hidden>
+  </div>
+
+  <div class="card hidden" id="expired-card">
+    <p>This session has ended.</p>
+    <button class="primary">Start a new session</button>
+  </div>
+
+  <div class="card hidden" id="full-card">
+    <p><strong>This session is full.</strong></p>
+    <p class="hint">It's limited to 2 devices and both slots are taken. If that isn't you and your other device, someone else may have the link — start a fresh session to be safe.</p>
+    <div class="btn-row">
+      <button class="primary" id="full-new">Start a new session</button>
+      <button id="full-retry">Try again</button>
+    </div>
+  </div>
+</main>
+
+<div id="drop-overlay" class="hidden">Drop to send</div>
+
+<footer>End-to-end encrypted &middot; nothing is stored &middot; sessions expire after 10 minutes idle<br>
+<a href="https://codecanary.org/status/70b9b9a6d72e" rel="noopener"><img src="https://codecanary.org/badge/70b9b9a6d72e.svg" alt="CodeCanary: JavaScript integrity status" height="22"></a></footer>
+
+<script src="/qrcode.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

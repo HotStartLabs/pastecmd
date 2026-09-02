@@ -1,0 +1,35 @@
+{
+  "name": "pastecmd",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-07-01",
+  // Overridden to "dev" by .dev.vars under `wrangler dev`, which gates the
+  // https redirect (local dev serves plain http).
+  "vars": { "ENVIRONMENT": "production" },
+  "routes": [
+    { "pattern": "pastecmd.com", "custom_domain": true },
+    { "pattern": "www.pastecmd.com", "custom_domain": true },
+    { "pattern": "pastecommand.com", "custom_domain": true },
+    { "pattern": "www.pastecommand.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // Run the worker before serving assets so scheme/host redirects
+    // (http→https, pastecommand.com→pastecmd.com) apply to every request.
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "Session"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Session"]
+    }
+  ]
+}

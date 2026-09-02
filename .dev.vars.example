@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `wrangler dev`. "dev" disables the https redirect and
+# widens connect-src to ws://localhost so the page can connect over plain http.
+ENVIRONMENT=dev

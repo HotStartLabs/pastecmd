@@ -1,0 +1,13 @@
+{
+  "name": "pastecmd",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Copy & paste between your phone and computer. No install, no account.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
