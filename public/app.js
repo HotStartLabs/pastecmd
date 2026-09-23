@@ -1,7 +1,8 @@
 // pastecmd client. All content is AES-GCM encrypted with a key that lives in
 // the URL fragment and never reaches the server. Every ciphertext is bound to
-// its context via AAD ("clip", "meta"+fileId, or "chunk"+fileId+index) so a
-// relay cannot replay one message as another or reorder file chunks.
+// its context via AAD ("clip"+sender+seq, "file-start"+sender+seq+fileId, or
+// "chunk"+fileId+index) so a relay cannot replay one message as another,
+// re-deliver an old one, or reorder file chunks.
 // Server control messages (peer count) arrive prefixed with "\u0000"; the
 // server refuses to relay client strings with that prefix, so a third device
 // in the session cannot forge them.
@@ -128,6 +129,55 @@
       { name: "AES-GCM", iv, additionalData: aad }, key, ct);
   }
 
+  // --- Replay protection ---
+  // Each page load picks a random device ID and numbers every JSON message it
+  // sends (clips and file-starts). Both go into the AAD so the relay can't
+  // alter them, and receivers drop anything not newer than the last message
+  // they authenticated from that device — the relay can't roll a clip back or
+  // re-deliver a whole file. File chunks need no numbering: they're bound to
+  // their fileId, which is only accepted once. (A device that has just loaded
+  // has no history, so the first message it sees could still be a stale one;
+  // closing that gap would need a handshake.)
+  const deviceId = crypto.getRandomValues(new Uint8Array(8));
+  const deviceIdB64 = b64url.encode(deviceId);
+  const lastSeq = new Map(); // sender device ID (b64) -> highest authenticated seq
+  let sendSeq = 0, outbox = Promise.resolve();
+  const sealedAad = (type, from, seq, extra) =>
+    concatBytes(te.encode(type), from, u32(seq), extra);
+
+  // All sealed sends go through one queue so sequence numbers reach the wire
+  // in order — otherwise a slow encrypt could put seq N behind N+1 and the
+  // receiver would drop it as a replay.
+  function sendSealed(type, bytes, extra = new Uint8Array(0), fields = {}) {
+    const sent = outbox.then(async () => {
+      const seq = ++sendSeq;
+      const { iv, ct } = await encryptBytes(bytes, sealedAad(type, deviceId, seq, extra));
+      ws.send(JSON.stringify({
+        type, ...fields, from: deviceIdB64, seq,
+        iv: b64url.encode(iv), data: b64url.encode(ct),
+      }));
+    });
+    outbox = sent.catch(() => {});
+    return sent;
+  }
+
+  // Returns the plaintext, or throws if the message is reflected, replayed,
+  // malformed, or fails authentication.
+  async function openSealed(msg, extra = new Uint8Array(0)) {
+    if (msg.from === deviceIdB64) throw new Error("reflected");
+    const from = b64url.decode(msg.from);
+    if (from.length !== 8 || !Number.isInteger(msg.seq) || msg.seq < 1 || msg.seq > 0xffffffff) {
+      throw new Error("malformed");
+    }
+    if (msg.seq <= (lastSeq.get(msg.from) || 0)) throw new Error("replayed");
+    const pt = await decryptBytes(
+      b64url.decode(msg.iv), b64url.decode(msg.data), sealedAad(msg.type, from, msg.seq, extra));
+    // Only advance after authentication, so a forged high seq can't lock
+    // out the real sender.
+    lastSeq.set(msg.from, msg.seq);
+    return pt;
+  }
+
   // --- Status UI ---
   const statusEl = $("status"), statusText = $("status-text");
   function setStatus(cls, text) {
@@ -215,8 +265,7 @@
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "clip") {
       try {
-        const pt = await decryptBytes(
-          b64url.decode(msg.iv), b64url.decode(msg.data), te.encode("clip"));
+        const pt = await openSealed(msg);
         const text = td.decode(pt);
         if (clip.value !== text) {
           // Assigning .value throws the caret to the end — restore it so a
@@ -229,7 +278,7 @@
               Math.min(start, text.length), Math.min(end, text.length));
           }
         }
-      } catch { /* wrong key or tampered — ignore */ }
+      } catch { /* wrong key, tampered or replayed — ignore */ }
     } else if (msg.type === "file-start") {
       await onFileStart(msg);
     }
@@ -244,9 +293,8 @@
   connect();
 
   // --- Sync on typing (debounced) ---
-  async function sendClip() {
-    const { iv, ct } = await encryptBytes(te.encode(clip.value), te.encode("clip"));
-    ws.send(JSON.stringify({ type: "clip", iv: b64url.encode(iv), data: b64url.encode(ct) }));
+  function sendClip() {
+    return sendSealed("clip", te.encode(clip.value)).catch(() => {});
   }
   let debounce;
   clip.addEventListener("input", () => {
@@ -293,7 +341,6 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const fmtSize = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB`
     : n >= 1e3 ? `${(n / 1e3).toFixed(0)} KB` : `${n} B`;
-  const metaAad = (fileId) => concatBytes(te.encode("meta"), fileId);
   const chunkAad = (fileId, index) => concatBytes(te.encode("chunk"), fileId, u32(index));
   const FRAME_HEADER = 20, GCM_TAG = 16;
   // Plaintext length of chunk `index`: every chunk is full except the last.
@@ -351,11 +398,7 @@
     try {
       const meta = te.encode(JSON.stringify(
         { name: file.name, size: file.size, mime: file.type, chunks }));
-      const { iv, ct } = await encryptBytes(meta, metaAad(fileId));
-      ws.send(JSON.stringify({
-        type: "file-start", id: b64url.encode(fileId),
-        iv: b64url.encode(iv), data: b64url.encode(ct),
-      }));
+      await sendSealed("file-start", meta, fileId, { id: b64url.encode(fileId) });
 
       for (let i = 0; i < chunks; i++) {
         // The receiver leaving mid-send would otherwise upload the rest of the
@@ -406,10 +449,9 @@
     try {
       fileId = b64url.decode(msg.id);
       if (fileId.length !== 4) return;
-      const pt = await decryptBytes(
-        b64url.decode(msg.iv), b64url.decode(msg.data), metaAad(fileId));
+      const pt = await openSealed(msg, fileId);
       meta = JSON.parse(td.decode(pt));
-    } catch { return; /* wrong key or tampered — ignore */ }
+    } catch { return; /* wrong key, tampered or replayed — ignore */ }
     if (!meta || typeof meta.name !== "string" || typeof meta.mime !== "string" ||
         !Number.isSafeInteger(meta.size) || meta.size < 0 || meta.size > MAX_FILE_BYTES ||
         meta.chunks !== Math.max(1, Math.ceil(meta.size / CHUNK_SIZE))) return;
