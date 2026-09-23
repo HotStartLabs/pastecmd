@@ -295,6 +295,10 @@
     : n >= 1e3 ? `${(n / 1e3).toFixed(0)} KB` : `${n} B`;
   const metaAad = (fileId) => concatBytes(te.encode("meta"), fileId);
   const chunkAad = (fileId, index) => concatBytes(te.encode("chunk"), fileId, u32(index));
+  const FRAME_HEADER = 20, GCM_TAG = 16;
+  // Plaintext length of chunk `index`: every chunk is full except the last.
+  const chunkLen = (meta, index) =>
+    index < meta.chunks - 1 ? CHUNK_SIZE : meta.size - (meta.chunks - 1) * CHUNK_SIZE;
 
   function transferRow(name, size) {
     const el = document.createElement("div");
@@ -329,8 +333,15 @@
     };
   }
 
-  async function sendFile(file) {
+  // Files go out one at a time: the receiver caps concurrent incoming
+  // transfers, and parallel sends would only split the same bandwidth.
+  let sendChain = Promise.resolve();
+  function queueFile(file) {
     const row = transferRow(file.name, file.size);
+    sendChain = sendChain.then(() => sendFile(file, row));
+  }
+
+  async function sendFile(file, row) {
     if (file.size > MAX_FILE_BYTES) return row.fail("Too big — 50 MB max");
     if (peerCount < 2) return row.fail("No other device connected — scan the QR first");
     if (!ws || ws.readyState !== WebSocket.OPEN) return row.fail("Not connected");
@@ -372,27 +383,58 @@
     }
   }
 
-  const incoming = new Map(); // fileId (b64) -> { meta, fileId, parts, got, row }
+  // A peer holding the key is trusted with content, not with our memory. The
+  // declared size is enforced chunk by chunk (so it bounds what we buffer),
+  // in-flight transfers are capped, and a transfer that stops making progress
+  // is dropped rather than holding its slot forever.
+  const incoming = new Map(); // fileId (b64) -> { meta, fileId, parts, got, row, stall }
+  const MAX_INCOMING = 8;
+  const MAX_INCOMING_BYTES = 200 * 1024 * 1024;
+  const STALL_MS = 60_000;
+
+  function armStall(id, t) {
+    clearTimeout(t.stall);
+    t.stall = setTimeout(() => {
+      if (incoming.get(id) !== t) return;
+      incoming.delete(id);
+      t.row.fail("Interrupted — transfer stalled");
+    }, STALL_MS);
+  }
 
   async function onFileStart(msg) {
     let meta, fileId;
     try {
       fileId = b64url.decode(msg.id);
+      if (fileId.length !== 4) return;
       const pt = await decryptBytes(
         b64url.decode(msg.iv), b64url.decode(msg.data), metaAad(fileId));
       meta = JSON.parse(td.decode(pt));
     } catch { return; /* wrong key or tampered — ignore */ }
-    if (typeof meta.size !== "number" || meta.size > MAX_FILE_BYTES) return;
+    if (!meta || typeof meta.name !== "string" || typeof meta.mime !== "string" ||
+        !Number.isSafeInteger(meta.size) || meta.size < 0 || meta.size > MAX_FILE_BYTES ||
+        meta.chunks !== Math.max(1, Math.ceil(meta.size / CHUNK_SIZE))) return;
+    if (incoming.has(msg.id)) return;
     const row = transferRow(meta.name, meta.size);
-    incoming.set(msg.id, { meta, fileId, parts: new Array(meta.chunks), got: 0, row });
+    let pending = 0;
+    for (const t of incoming.values()) pending += t.meta.size;
+    if (incoming.size >= MAX_INCOMING || pending + meta.size > MAX_INCOMING_BYTES) {
+      return row.fail("Skipped — too many files arriving at once");
+    }
+    const t = { meta, fileId, parts: new Array(meta.chunks), got: 0, row };
+    incoming.set(msg.id, t);
+    armStall(msg.id, t);
   }
 
   async function onFileChunk(buf) {
+    if (buf.byteLength < FRAME_HEADER) return;
     const id = b64url.encode(new Uint8Array(buf, 0, 4));
     const t = incoming.get(id);
     if (!t) return; // joined mid-transfer, or not for us
     const index = new DataView(buf).getUint32(4);
     if (index >= t.meta.chunks || t.parts[index]) return;
+    // Pin every chunk to its exact expected size (checked before paying for
+    // a decrypt), so the file can't grow past what file-start declared.
+    if (buf.byteLength !== FRAME_HEADER + chunkLen(t.meta, index) + GCM_TAG) return;
     let plain;
     try {
       plain = await decryptBytes(
@@ -401,8 +443,10 @@
     t.parts[index] = plain;
     t.got++;
     t.row.progress(t.got, t.meta.chunks);
+    armStall(id, t);
     if (t.got === t.meta.chunks) {
       incoming.delete(id);
+      clearTimeout(t.stall);
       const blob = new Blob(t.parts, { type: t.meta.mime || "application/octet-stream" });
       const url = URL.createObjectURL(blob);
       if ((t.meta.mime || "").startsWith("image/")) {
@@ -424,7 +468,7 @@
   // --- File pickers: button, drag-drop, screenshot paste ---
   $("file-btn").onclick = () => $("file-input").click();
   $("file-input").onchange = () => {
-    for (const f of $("file-input").files) sendFile(f);
+    for (const f of $("file-input").files) queueFile(f);
     $("file-input").value = "";
   };
 
@@ -442,14 +486,14 @@
     e.preventDefault();
     dragDepth = 0;
     $("drop-overlay").classList.add("hidden");
-    for (const f of e.dataTransfer.files) sendFile(f);
+    for (const f of e.dataTransfer.files) queueFile(f);
   });
 
   document.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files || [])];
     if (files.length) {
       e.preventDefault();
-      files.forEach(sendFile);
+      files.forEach(queueFile);
     }
   });
 
