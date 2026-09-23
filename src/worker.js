@@ -5,6 +5,17 @@
 const SESSION_TTL_MS = 10 * 60 * 1000; // idle sessions die after 10 minutes
 const MAX_MESSAGE_BYTES = 1_000_000;
 const MAX_PEERS = 8;
+const DEFAULT_PEERS = 2; // the safe default, matching the client's
+
+// Turn a connection away with a reason the client can tell apart from a
+// transient drop: establish the socket, then close it immediately. It's never
+// accepted into the session, so it doesn't count toward the peer total.
+function reject(code, reason) {
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].close(code, reason);
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
 
 // Server→client control messages are prefixed with NUL, and the relay refuses
 // to forward client strings carrying that prefix — so a device in the session
@@ -58,25 +69,26 @@ export class Session {
       return new Response("Expected WebSocket", { status: 426 });
     }
 
-    // The session creator (first device to connect) sets the concurrent-device
-    // cap; later joiners can't widen it. Stored so it survives DO hibernation,
-    // and cleared with the rest of the session on expiry.
+    // The session creator sets the concurrent-device cap; later joiners can't
+    // widen it. Stored so it survives DO hibernation, and cleared with the
+    // rest of the session on expiry.
+    //
+    // Only a connection that asks to create the session (the host, which
+    // sends ?max) may start one. Otherwise a joiner reopening a dead link —
+    // a reload, or history, where the key also sits — would silently bring
+    // the session back to life under the old key.
     let max = await this.ctx.storage.get("max");
     if (max === undefined) {
-      const req = parseInt(new URL(request.url).searchParams.get("max"), 10);
-      max = Number.isInteger(req) ? Math.min(Math.max(req, 1), MAX_PEERS) : MAX_PEERS;
+      const param = new URL(request.url).searchParams.get("max");
+      if (param === null) return reject(4000, "expired");
+      const req = parseInt(param, 10);
+      max = Number.isInteger(req) ? Math.min(Math.max(req, 1), MAX_PEERS) : DEFAULT_PEERS;
       await this.ctx.storage.put("max", max);
     }
 
-    if (this.ctx.getWebSockets().length >= max) {
-      // Session full. Establish the socket, then close it immediately with a
-      // reason the client can tell apart from a transient drop. It's never
-      // accepted into the session, so it doesn't count toward the peer total.
-      const rejectPair = new WebSocketPair();
-      rejectPair[1].accept();
-      rejectPair[1].close(4001, "full");
-      return new Response(null, { status: 101, webSocket: rejectPair[0] });
-    }
+    // Session full: the client shows this as an alarm, since for a legit
+    // device it means someone else holds a slot.
+    if (this.ctx.getWebSockets().length >= max) return reject(4001, "full");
 
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
