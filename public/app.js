@@ -245,35 +245,38 @@
     };
 
     ws.onclose = (ev) => {
-      if (gen !== generation) return; // superseded by a session regeneration
-      if (ev.reason === "expired") {
-        expired = true;
-        $("qr-card").classList.add("hidden");
-        $("clip-card").classList.add("hidden");
-        $("expired-card").classList.remove("hidden");
-        return;
-      }
-      if (ev.reason === "full") {
-        // Turned away: the session is already at its device limit. Terminal
-        // state, not a retry loop — and for a legit device this is the alarm
-        // that someone else holds the second slot.
-        $("clip-card").classList.add("hidden");
-        $("full-card").classList.remove("hidden");
-        return;
-      }
-      if (ev.reason === "replaced") {
-        // The same tab reconnected elsewhere — in practice a duplicated tab,
-        // which carries a copy of this one's sessionStorage. Stand down
-        // rather than fight over the slot.
-        $("qr-card").classList.add("hidden");
-        $("clip-card").classList.add("hidden");
-        $("replaced-card").classList.remove("hidden");
-        return;
-      }
+      if (gen !== generation) return; // superseded (regenerated, or ended)
+      if (TERMINAL.has(ev.reason)) return endSession(ev.reason);
       setStatus("dead", "Reconnecting…");
       setTimeout(() => { if (gen === generation) connect(); }, retryDelay);
       retryDelay = Math.min(retryDelay * 2, 8000);
     };
+  }
+
+  // Final states, announced by the server in a control message and/or the
+  // close reason (whichever arrives first). Not a retry loop.
+  const TERMINAL = new Set(["expired", "full", "replaced"]);
+  function endSession(reason) {
+    generation++; // this socket's close event, whenever it lands, is ignored
+    try { ws.close(); } catch {}
+    if (reason === "expired") {
+      expired = true;
+      $("qr-card").classList.add("hidden");
+      $("clip-card").classList.add("hidden");
+      $("expired-card").classList.remove("hidden");
+    } else if (reason === "full") {
+      // Turned away: the session is already at its device limit. For a legit
+      // device this is the alarm that someone else holds the second slot.
+      $("clip-card").classList.add("hidden");
+      $("full-card").classList.remove("hidden");
+    } else if (reason === "replaced") {
+      // The same tab reconnected elsewhere — in practice a duplicated tab,
+      // which carries a copy of this one's sessionStorage. Stand down rather
+      // than fight over the slot.
+      $("qr-card").classList.add("hidden");
+      $("clip-card").classList.add("hidden");
+      $("replaced-card").classList.remove("hidden");
+    }
   }
 
   async function onMessage(ev) {
@@ -284,7 +287,9 @@
       // Server control message — cannot be forged by other devices.
       let msg;
       try { msg = JSON.parse(ev.data.slice(1)); } catch { return; }
-      if (msg.type === "peers") {
+      if (msg.type === "closing" && TERMINAL.has(msg.reason)) {
+        endSession(msg.reason);
+      } else if (msg.type === "peers") {
         peerCount = msg.count;
         if (msg.count >= 2) setStatus("linked", `Linked — ${msg.count} devices`);
         else setStatus("", isHost ? "Waiting for your phone to scan…" : "Other device disconnected");

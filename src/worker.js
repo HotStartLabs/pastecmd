@@ -24,6 +24,15 @@ function reject(code, reason) {
 // cannot forge a server message (e.g. spoof the peer count to hide itself).
 const CONTROL_PREFIX = "\u0000";
 
+// Close a session member for a reason the client treats as final. The reason
+// goes ahead as a control message too: after a close we start, the client's
+// close event can lag (it waits on TCP teardown), and it shouldn't sit there
+// looking connected in the meantime.
+function closeWith(ws, code, reason) {
+  try { ws.send(CONTROL_PREFIX + JSON.stringify({ type: "closing", reason })); } catch {}
+  try { ws.close(code, reason); } catch {}
+}
+
 // The app lives on exactly one origin, https://<CANONICAL_HOST> (a wrangler
 // var). Every other hostname that reaches the worker is redirected there, and
 // it's the only origin allowed to open relay connections or to be named in
@@ -102,7 +111,7 @@ export class Session {
     if (rejoin) {
       for (const old of this.liveSockets()) {
         if (old.deserializeAttachment()?.token === rejoin) {
-          try { old.close(4003, "replaced"); } catch {}
+          closeWith(old, 4003, "replaced");
         }
       }
     }
@@ -173,7 +182,7 @@ export class Session {
 
   async alarm() {
     for (const ws of this.ctx.getWebSockets()) {
-      try { ws.close(1000, "expired"); } catch {}
+      closeWith(ws, 1000, "expired");
     }
     await this.ctx.storage.deleteAll();
   }
