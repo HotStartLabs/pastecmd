@@ -66,6 +66,7 @@ main {
 }
 #qr-holder canvas { width: 220px; height: 220px; display: block; }
 .hint { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
+.hint.warn { color: var(--warn); }
 #copy-link { margin-top: 12px; }
 
 .top-row {

@@ -10,11 +10,22 @@
   const $ = (id) => document.getElementById(id);
   const te = new TextEncoder(), td = new TextDecoder();
   const CONTROL = "\u0000";
+  // Native base64 where available. The fallback converts in 32 KB slices:
+  // spreading a whole buffer as call arguments overflows the engine's
+  // argument limit (about 65k in Safari), which made large clips fail to send.
   const b64url = {
-    encode: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
-    decode: (str) => Uint8Array.from(
-      atob(str.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)),
+    encode: (buf) => {
+      const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      if (bytes.toBase64) return bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    },
+    decode: (str) => Uint8Array.fromBase64
+      ? Uint8Array.fromBase64(str, { alphabet: "base64url" })
+      : Uint8Array.from(atob(str.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)),
   };
   const randomId = (bytes) => b64url.encode(crypto.getRandomValues(new Uint8Array(bytes)));
   const concatBytes = (...arrs) => {
@@ -293,8 +304,16 @@
   connect();
 
   // --- Sync on typing (debounced) ---
+  // The relay drops any message over 1 MB. Base64 and the JSON envelope add
+  // about a third, so cap the text well under that and say so, rather than
+  // letting an oversized clip silently never arrive.
+  const MAX_CLIP_BYTES = 700_000;
   function sendClip() {
-    return sendSealed("clip", te.encode(clip.value)).catch(() => {});
+    const bytes = te.encode(clip.value);
+    const tooBig = bytes.length > MAX_CLIP_BYTES;
+    $("clip-too-big").classList.toggle("hidden", !tooBig);
+    if (tooBig) return Promise.resolve();
+    return sendSealed("clip", bytes).catch(() => {});
   }
   let debounce;
   clip.addEventListener("input", () => {

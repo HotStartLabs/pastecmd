@@ -4,6 +4,7 @@
 
 const SESSION_TTL_MS = 10 * 60 * 1000; // idle sessions die after 10 minutes
 const MAX_MESSAGE_BYTES = 1_000_000;
+const utf8 = new TextEncoder();
 const MAX_PEERS = 8;
 const DEFAULT_PEERS = 2; // the safe default, matching the client's
 
@@ -121,7 +122,11 @@ export class Session {
     // reserved for server messages: never relay a client string bearing it.
     const isString = typeof message === "string";
     if (isString && message.startsWith(CONTROL_PREFIX)) return;
-    const size = isString ? message.length : message.byteLength;
+    // Measure strings in UTF-8 bytes, not UTF-16 code units (.length), which
+    // undercounts non-ASCII by up to 3x. The length pre-check skips encoding
+    // anything already too long.
+    if (isString && message.length > MAX_MESSAGE_BYTES) return;
+    const size = isString ? utf8.encode(message).byteLength : message.byteLength;
     if (size > MAX_MESSAGE_BYTES) return;
     await this.bumpExpiry();
     for (const other of this.ctx.getWebSockets()) {
