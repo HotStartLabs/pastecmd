@@ -45,8 +45,10 @@ const securityHeaders = (isDev, host) => ({
       : `connect-src 'self' wss://${host}; `) +
     // codecanary.org: the footer integrity badge image
     "img-src 'self' blob: https://codecanary.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
-    // Any future DOM-XSS sink assignment throws at runtime instead of executing.
-    "require-trusted-types-for 'script'",
+    // Any future DOM-XSS sink assignment throws at runtime instead of
+    // executing, and with no policies allowed (the page needs none), nothing
+    // can register a permissive "default" policy to launder strings through.
+    "require-trusted-types-for 'script'; trusted-types 'none'",
   // Two years + preload: submitted to hstspreload.org, so first visits are
   // HTTPS before any request is ever made.
   "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
