@@ -69,7 +69,7 @@ export class Session {
   }
 
   async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
 
