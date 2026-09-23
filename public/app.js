@@ -138,6 +138,7 @@
   // --- WebSocket ---
   const clip = $("clip");
   let ws, expired = false, retryDelay = 500, peerCount = 1, generation = 0;
+  let inbox = Promise.resolve(); // tail of the serialized message-handling chain
 
   function connect() {
     const gen = generation;
@@ -155,51 +156,13 @@
       if (clip.value) await sendClip();
     };
 
-    ws.onmessage = async (ev) => {
-      if (ev.data instanceof ArrayBuffer) { await onFileChunk(ev.data); return; }
-      if (typeof ev.data !== "string") return;
-
-      if (ev.data.startsWith(CONTROL)) {
-        // Server control message — cannot be forged by other devices.
-        let msg;
-        try { msg = JSON.parse(ev.data.slice(1)); } catch { return; }
-        if (msg.type === "peers") {
-          peerCount = msg.count;
-          if (msg.count >= 2) setStatus("linked", `Linked — ${msg.count} devices`);
-          else setStatus("", isHost ? "Waiting for your phone to scan…" : "Other device disconnected");
-          setQrLinked(msg.count >= 2);
-          // Alone again: any half-received file can never complete — say so
-          // instead of leaving its progress bar hanging forever.
-          if (msg.count < 2 && incoming.size) {
-            for (const t of incoming.values()) t.row.fail("Interrupted — other device disconnected");
-            incoming.clear();
-          }
-        }
-        return;
-      }
-
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === "clip") {
-        try {
-          const pt = await decryptBytes(
-            b64url.decode(msg.iv), b64url.decode(msg.data), te.encode("clip"));
-          const text = td.decode(pt);
-          if (clip.value !== text) {
-            // Assigning .value throws the caret to the end — restore it so a
-            // remote update doesn't yank the cursor mid-typing.
-            const focused = document.activeElement === clip;
-            const start = clip.selectionStart, end = clip.selectionEnd;
-            clip.value = text;
-            if (focused) {
-              clip.setSelectionRange(
-                Math.min(start, text.length), Math.min(end, text.length));
-            }
-          }
-        } catch { /* wrong key or tampered — ignore */ }
-      } else if (msg.type === "file-start") {
-        await onFileStart(msg);
-      }
+    // Handle messages strictly one at a time, in arrival order. An async
+    // onmessage alone doesn't: every await (decrypt) lets the next message's
+    // handler start, so chunks could race their own file-start, two copies of
+    // a chunk could both pass the duplicate check, and clips could land
+    // out of order.
+    ws.onmessage = (ev) => {
+      inbox = inbox.then(() => onMessage(ev)).catch(() => {});
     };
 
     ws.onclose = (ev) => {
@@ -223,6 +186,53 @@
       setTimeout(() => { if (gen === generation) connect(); }, retryDelay);
       retryDelay = Math.min(retryDelay * 2, 8000);
     };
+  }
+
+  async function onMessage(ev) {
+    if (ev.data instanceof ArrayBuffer) { await onFileChunk(ev.data); return; }
+    if (typeof ev.data !== "string") return;
+
+    if (ev.data.startsWith(CONTROL)) {
+      // Server control message — cannot be forged by other devices.
+      let msg;
+      try { msg = JSON.parse(ev.data.slice(1)); } catch { return; }
+      if (msg.type === "peers") {
+        peerCount = msg.count;
+        if (msg.count >= 2) setStatus("linked", `Linked — ${msg.count} devices`);
+        else setStatus("", isHost ? "Waiting for your phone to scan…" : "Other device disconnected");
+        setQrLinked(msg.count >= 2);
+        // Alone again: any half-received file can never complete — say so
+        // instead of leaving its progress bar hanging forever.
+        if (msg.count < 2 && incoming.size) {
+          for (const t of incoming.values()) t.row.fail("Interrupted — other device disconnected");
+          incoming.clear();
+        }
+      }
+      return;
+    }
+
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "clip") {
+      try {
+        const pt = await decryptBytes(
+          b64url.decode(msg.iv), b64url.decode(msg.data), te.encode("clip"));
+        const text = td.decode(pt);
+        if (clip.value !== text) {
+          // Assigning .value throws the caret to the end — restore it so a
+          // remote update doesn't yank the cursor mid-typing.
+          const focused = document.activeElement === clip;
+          const start = clip.selectionStart, end = clip.selectionEnd;
+          clip.value = text;
+          if (focused) {
+            clip.setSelectionRange(
+              Math.min(start, text.length), Math.min(end, text.length));
+          }
+        }
+      } catch { /* wrong key or tampered — ignore */ }
+    } else if (msg.type === "file-start") {
+      await onFileStart(msg);
+    }
   }
   $("full-new").onclick = () => { location.href = "/"; };
   $("full-retry").onclick = () => {
