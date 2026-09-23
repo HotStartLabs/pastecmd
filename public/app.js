@@ -478,6 +478,7 @@
   const MAX_INCOMING = 8;
   const MAX_INCOMING_BYTES = 200 * 1024 * 1024;
   const STALL_MS = 60_000;
+  const THUMB_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
 
   function armStall(id, t) {
     clearTimeout(t.stall);
@@ -533,12 +534,19 @@
     if (t.got === t.meta.chunks) {
       incoming.delete(id);
       clearTimeout(t.stall);
-      const blob = new Blob(t.parts, { type: t.meta.mime || "application/octet-stream" });
+      // The download blob is always octet-stream: blob: URLs carry our origin,
+      // so a peer-chosen type like text/html would render as a pastecmd.com
+      // page if opened in a tab. Only an allowlist of raster formats gets a
+      // typed view, and only for the <img> thumbnail.
+      const blob = new Blob(t.parts, { type: "application/octet-stream" });
       const url = URL.createObjectURL(blob);
-      if ((t.meta.mime || "").startsWith("image/")) {
+      if (THUMB_TYPES.has(t.meta.mime)) {
         const img = document.createElement("img");
         img.className = "thumb";
-        img.src = url;
+        const thumbUrl = URL.createObjectURL(blob.slice(0, blob.size, t.meta.mime));
+        // The decoded image outlives its URL; free it once loaded.
+        img.onload = img.onerror = () => URL.revokeObjectURL(thumbUrl);
+        img.src = thumbUrl;
         t.row.el.prepend(img);
       }
       const a = document.createElement("a");
