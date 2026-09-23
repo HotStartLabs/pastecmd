@@ -196,6 +196,21 @@
     statusText.textContent = text;
   }
 
+  // Per-tab rejoin token: lets this tab reclaim its own slot when it
+  // reconnects, even if the server still holds its old, dead socket (see
+  // Session.fetch). sessionStorage keeps it across a reload of this tab only;
+  // it's keyed by session, so a regenerated session gets a fresh one.
+  const tokens = new Map();
+  function rejoinToken() {
+    const k = `pastecmd-t-${sessionId}`;
+    let t = tokens.get(k);
+    try { t ||= sessionStorage.getItem(k); } catch {}
+    if (!t || !/^[A-Za-z0-9_-]{22}$/.test(t)) t = randomId(16);
+    tokens.set(k, t);
+    try { sessionStorage.setItem(k, t); } catch {}
+    return t;
+  }
+
   // --- WebSocket ---
   const clip = $("clip");
   let ws, expired = false, retryDelay = 500, peerCount = 1, generation = 0;
@@ -206,7 +221,7 @@
     const proto = location.protocol === "https:" ? "wss" : "ws";
     // Host advertises the cap; the server only honors it from the first (host)
     // connection, so a later joiner can't raise it.
-    const q = isHost ? `?max=${maxDevices()}` : "";
+    const q = (isHost ? `?max=${maxDevices()}&` : "?") + `t=${rejoinToken()}`;
     ws = new WebSocket(`${proto}://${location.host}/ws/${sessionId}${q}`);
     ws.binaryType = "arraybuffer";
 
@@ -241,6 +256,15 @@
         // that someone else holds the second slot.
         $("clip-card").classList.add("hidden");
         $("full-card").classList.remove("hidden");
+        return;
+      }
+      if (ev.reason === "replaced") {
+        // The same tab reconnected elsewhere — in practice a duplicated tab,
+        // which carries a copy of this one's sessionStorage. Stand down
+        // rather than fight over the slot.
+        $("qr-card").classList.add("hidden");
+        $("clip-card").classList.add("hidden");
+        $("replaced-card").classList.remove("hidden");
         return;
       }
       setStatus("dead", "Reconnecting…");
@@ -295,6 +319,7 @@
     }
   }
   $("full-new").onclick = () => { location.href = "/"; };
+  $("replaced-new").onclick = () => { location.href = "/"; };
   $("full-retry").onclick = () => {
     $("full-card").classList.add("hidden");
     $("clip-card").classList.remove("hidden");

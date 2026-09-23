@@ -237,4 +237,4 @@ footer {
 }
 .hidden { display: none !important; }
 
-#expired-card { text-align: center; }
+#expired-card, #replaced-card { text-align: center; }
