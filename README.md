@@ -69,12 +69,16 @@ browser tab (or another device on your network) — the two will sync.
 ## Deploying
 
 1. `npx wrangler login` — sign in to your (free) Cloudflare account.
-2. `npm run deploy` — the site goes live at `pastecmd.<your-subdomain>.workers.dev`.
+2. `npm run deploy` — the site goes live on the custom domains in `routes`.
 
-If you're deploying your own copy, first remove (or change) the `routes` in
-`wrangler.jsonc` — they bind the worker to the pastecmd.com domains — and update
-the origin allow-list in `src/worker.js` (`ALLOWED_WS_ORIGINS`) and the
-`connect-src` in its CSP to your own hostname.
+If you're deploying your own copy, edit `wrangler.jsonc` first:
+
+- Set `CANONICAL_HOST` to your hostname. The worker redirects every other
+  host to it, and it's the only origin allowed in the CSP `connect-src` and
+  on the WebSocket relay.
+- Replace the `routes` (they bind the worker to the pastecmd.com domains).
+  To run on `workers.dev` instead, remove `routes`, set `"workers_dev": true`,
+  and set `CANONICAL_HOST` to `pastecmd.<your-subdomain>.workers.dev`.
 
 ### Connecting the domains
 

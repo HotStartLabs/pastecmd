@@ -24,15 +24,15 @@ function reject(code, reason) {
 // cannot forge a server message (e.g. spoof the peer count to hide itself).
 const CONTROL_PREFIX = "\u0000";
 
-// Browsers enforce none of the WS same-origin rules, so check Origin here:
-// only our own pages may open relay connections. Not enforced in dev, where
-// wrangler's host simulation rewrites the Origin header.
-const ALLOWED_WS_ORIGINS = new Set(["https://pastecmd.com"]);
+// The app lives on exactly one origin, https://<CANONICAL_HOST> (a wrangler
+// var). Every other hostname that reaches the worker is redirected there, and
+// it's the only origin allowed to open relay connections or to be named in
+// connect-src.
 
 // connect-src varies by environment: `wrangler dev` serves plain http and the
 // page connects over ws://, so dev needs the localhost entries — but they must
 // never appear in the production policy.
-const securityHeaders = (isDev) => ({
+const securityHeaders = (isDev, host) => ({
   "Content-Security-Policy":
     // script-src is 'self' with no exceptions. Notably that means enabling
     // Cloudflare Web Analytics at the edge would be BLOCKED by this header
@@ -42,7 +42,7 @@ const securityHeaders = (isDev) => ({
     "default-src 'none'; script-src 'self'; style-src 'self'; " +
     (isDev
       ? "connect-src 'self' ws://localhost:8787 ws://127.0.0.1:8787; "
-      : "connect-src 'self' wss://pastecmd.com; ") +
+      : `connect-src 'self' wss://${host}; `) +
     // codecanary.org: the footer integrity badge image
     "img-src 'self' blob: https://codecanary.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
     // Any future DOM-XSS sink assignment throws at runtime instead of executing.
@@ -180,36 +180,42 @@ export class Session {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    // Canonicalize to https://pastecmd.com: force https, fold www and
+    // Canonicalize to https://<CANONICAL_HOST>: force https, fold www and
     // pastecommand.com into the apex. The URL fragment (session key) survives
-    // redirects — browsers re-apply it.
+    // redirects — browsers re-apply it. No hostname is exempt: workers.dev
+    // and preview URLs are disabled in wrangler.jsonc, and if one were ever
+    // re-enabled it would redirect here rather than serve a second origin.
     // Skipped entirely in dev: `wrangler dev` serves plain http and simulates
     // the production hostname, so hostname checks can't distinguish dev.
     const isDev = env.ENVIRONMENT !== "production";
-    const offCanonicalHost = !isDev && url.hostname !== "pastecmd.com" &&
-      !url.hostname.endsWith(".workers.dev");
+    const host = env.CANONICAL_HOST;
+    if (!isDev && !host) return new Response("CANONICAL_HOST not set", { status: 500 });
+    const offCanonicalHost = !isDev && url.hostname !== host;
     // Hop 1 — scheme upgrade on the SAME host. HSTS preload requires the
     // first redirect from http to stay on-host, and it's also how each host
     // gets to deliver its own HSTS header (which clients ignore over plain
     // http, hence no HSTS on this hop per RFC 6797).
     if (url.protocol === "http:" && !isDev) {
       url.protocol = "https:";
-      const headers = { Location: url.toString(), ...securityHeaders(isDev) };
+      const headers = { Location: url.toString(), ...securityHeaders(isDev, host) };
       delete headers["Strict-Transport-Security"];
       return new Response(null, { status: 301, headers });
     }
     // Hop 2 — canonical-host fold over https, HSTS included.
     if (offCanonicalHost) {
-      url.hostname = "pastecmd.com";
+      url.hostname = host;
       return new Response(null, {
         status: 301,
-        headers: { Location: url.toString(), ...securityHeaders(isDev) },
+        headers: { Location: url.toString(), ...securityHeaders(isDev, host) },
       });
     }
     const match = url.pathname.match(/^\/ws\/([A-Za-z0-9_-]{4,64})$/);
     if (match) {
+      // Browsers enforce none of the WS same-origin rules, so check Origin
+      // here: only our own pages may open relay connections. Not enforced in
+      // dev, where wrangler's host simulation rewrites the Origin header.
       const origin = request.headers.get("Origin");
-      if (!isDev && origin && !ALLOWED_WS_ORIGINS.has(origin)) {
+      if (!isDev && origin && origin !== `https://${host}`) {
         return new Response("Forbidden", { status: 403 });
       }
       const id = env.SESSIONS.idFromName(match[1]);
@@ -218,7 +224,7 @@ export default {
 
     const res = await env.ASSETS.fetch(request);
     const headers = new Headers(res.headers);
-    for (const [k, v] of Object.entries(securityHeaders(isDev))) headers.set(k, v);
+    for (const [k, v] of Object.entries(securityHeaders(isDev, host))) headers.set(k, v);
     return new Response(res.body, { status: res.status, headers });
   },
 };

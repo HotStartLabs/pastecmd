@@ -2,9 +2,15 @@
   "name": "pastecmd",
   "main": "src/worker.js",
   "compatibility_date": "2026-07-01",
-  // Overridden to "dev" by .dev.vars under `wrangler dev`, which gates the
-  // https redirect (local dev serves plain http).
-  "vars": { "ENVIRONMENT": "production" },
+  // ENVIRONMENT is overridden to "dev" by .dev.vars under `wrangler dev`,
+  // which gates the https redirect (local dev serves plain http).
+  // CANONICAL_HOST is the app's one origin: everything else redirects to it,
+  // and it's the only origin allowed in connect-src and on the relay.
+  "vars": { "ENVIRONMENT": "production", "CANONICAL_HOST": "pastecmd.com" },
+  // Serve only on the custom domains below. workers.dev and per-version
+  // preview URLs would otherwise be public second origins for the app.
+  "workers_dev": false,
+  "preview_urls": false,
   "routes": [
     { "pattern": "pastecmd.com", "custom_domain": true },
     { "pattern": "www.pastecmd.com", "custom_domain": true },
