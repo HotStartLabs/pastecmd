@@ -211,7 +211,8 @@ export default {
         headers: { Location: url.toString(), ...securityHeaders(isDev, host) },
       });
     }
-    const match = url.pathname.match(/^\/ws\/([A-Za-z0-9_-]{4,64})$/);
+    // Session IDs are exactly 9 random bytes, base64url (see app.js).
+    const match = url.pathname.match(/^\/ws\/([A-Za-z0-9_-]{12})$/);
     if (match) {
       // Browsers enforce none of the WS same-origin rules, so check Origin
       // here: only our own pages may open relay connections. Not enforced in

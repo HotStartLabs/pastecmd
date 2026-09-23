@@ -42,9 +42,12 @@
 
   // Session identity lives in the URL fragment: #<sessionId>.<key>
   // The fragment is never sent to the server, so the key stays between devices.
+  // Exact lengths: a 9-byte ID and a 32-byte key, as the host generates. A
+  // malformed link (truncated by a scanner, say) starts a fresh session.
   const MAX_PEERS = 8;
   let sessionId, keyRaw, isHost, key;
-  const m = location.hash.match(/^#([A-Za-z0-9_-]{4,64})\.([A-Za-z0-9_-]{10,64})$/);
+  const m = location.hash.match(/^#([A-Za-z0-9_-]{12})\.([A-Za-z0-9_-]{43})$/);
+  if (!m && location.hash) history.replaceState(null, "", location.pathname);
   if (m) {
     isHost = false;
     sessionId = m[1];
