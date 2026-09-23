@@ -32,9 +32,21 @@ Live at [pastecmd.com](https://pastecmd.com). Sibling project of
   the server locks the cap on the creator's first connection — later joiners
   can't widen it). A third device is turned away with a "session full" screen,
   which doubles as an alarm if someone else has captured the QR.
-- Every ciphertext is bound to its context with AES-GCM AAD ("clip",
-  "meta"+fileId, "chunk"+fileId+index), so the relay cannot replay a message
-  as a different type or reorder file chunks without decryption failing.
+- Only the host can create a session. Once one expires, reopening the link
+  (a reload, or from history) shows "session ended" instead of bringing the
+  session back under the old key.
+- A device that drops and reconnects (network switch, reload) reclaims its
+  own slot with a per-tab random token, so a dead connection still holding
+  the slot doesn't trigger a false "session full". Only that tab has the
+  token, so nobody else holding the link can use it to push a device out.
+- Every ciphertext is bound to its context with AES-GCM AAD
+  ("clip"+sender+seq, "file-start"+sender+seq+fileId, "chunk"+fileId+index).
+  The relay cannot replay a message as a different type, re-deliver an old
+  clip or file, or reorder file chunks without it being rejected.
+- Received files are also checked against what a peer (who holds the key)
+  could send: metadata is validated, every chunk must be exactly its
+  expected size, and in-flight transfers are capped. Downloads are served as
+  `application/octet-stream` regardless of the sender's declared type.
 - Server control messages (peer count) are NUL-prefixed and the relay refuses
   to forward client strings with that prefix — a device in the session cannot
   forge the peer count to hide its presence. The device counter in the UI is
@@ -44,15 +56,15 @@ Live at [pastecmd.com](https://pastecmd.com). Sibling project of
   crypto retains 128-bit margin against Grover).
 - Strict security headers on every response: CSP (no inline script, no
   external sources) with Trusted Types enforcement (DOM-XSS sinks throw at
-  runtime), HSTS (2 years, preload), full cross-origin isolation
+  runtime, and no policy may be created to bypass that), HSTS (2 years, preload), full cross-origin isolation
   (COOP/COEP/CORP), X-Frame-Options DENY, no-referrer, nosniff.
 - No cookies, no analytics, no external requests, no server-side storage of
   content — the only server state is a session-expiry alarm.
 - Residual/accepted: anyone who captures the full QR/link during the session
   window holds the key (that's the trust model — guard the QR like a shared
   secret); Cloudflare sees connection metadata (IPs, timing, ciphertext sizes)
-  but no plaintext; replay of an identical message within one session is
-  possible but harmless (idempotent).
+  but no plaintext. A device that has just loaded has no message history, so
+  the relay could feed it a stale clip as the first one it sees.
 - Sessions expire after 10 minutes idle; nothing is ever stored.
 
 ## Local development
