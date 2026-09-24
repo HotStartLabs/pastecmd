@@ -111,6 +111,25 @@ If you're deploying your own copy, edit `wrangler.jsonc` first:
 The worker itself 301-redirects any `pastecommand.com` request to
 `pastecmd.com`, so both names work and search engines see one canonical site.
 
+### Rate limiting the relay
+
+Each new session ID starts a Durable Object, which means a storage write and
+an alarm, so `/ws/*` is rate limited per IP with a WAF rule on the
+`pastecmd.com` zone. `pastecommand.com` doesn't need one: it redirects before
+anything reaches a Durable Object. Create the rule under
+[Security rules](https://dash.cloudflare.com/?to=/:account/:zone/security/security-rules)
+→ **Create rule** → **Rate limiting rules**:
+
+- **If incoming requests match:** URI Path *starts with* `/ws/`
+  (expression `starts_with(http.request.uri.path, "/ws/")`)
+- **With the same characteristics:** IP
+- **When rate exceeds:** 20 requests per 10 seconds
+- **Then take action:** Block, for 10 seconds
+
+Those are the Free plan's only options (one rule, IP only, 10 s period,
+10 s timeout). 20 per 10 s leaves headroom for a host and a phone sharing one
+NAT address while both reconnect with backoff.
+
 ## Costs
 
 Free tier covers ~100K requests/day (thousands of sessions). If it outgrows
