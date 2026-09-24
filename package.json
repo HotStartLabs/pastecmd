@@ -5,7 +5,8 @@
   "description": "Copy & paste between your phone and computer. No install, no account.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node test/integration.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

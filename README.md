@@ -78,6 +78,12 @@ npm run dev        # http://localhost:8787
 To test, open the page, then open the "or open <link>" URL in a second
 browser tab (or another device on your network) — the two will sync.
 
+`npm test` runs the integration tests. They start their own `wrangler dev`,
+drive two copies of the real client (host and joiner, with a stubbed DOM),
+and use raw sockets to act as a malicious relay and a malicious peer that
+holds the key: replays, duplicate chunks, forged metadata, oversized
+messages.
+
 ## Deploying
 
 1. `npx wrangler login` — sign in to your (free) Cloudflare account.
