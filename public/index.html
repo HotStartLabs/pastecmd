@@ -35,7 +35,8 @@
         <span class="lever"></span>
       </label>
     </div>
-    <textarea id="clip" placeholder="Type or paste here — it appears on the other device instantly." spellcheck="false"></textarea>
+    <textarea id="clip" autocomplete="off" placeholder="Type or paste here — it appears on the other device instantly." spellcheck="false"></textarea>
+    <p class="hint warn hidden" id="clip-too-big">Too long to sync — the limit is about 700&nbsp;KB of text. Send it as a file instead.</p>
     <div class="btn-row">
       <button class="primary" id="copy-btn">Copy</button>
       <button id="paste-btn">Paste from clipboard</button>
@@ -50,6 +51,11 @@
   <div class="card hidden" id="expired-card">
     <p>This session has ended.</p>
     <button class="primary">Start a new session</button>
+  </div>
+
+  <div class="card hidden" id="replaced-card">
+    <p>This session is now open in another tab or window.</p>
+    <button class="primary" id="replaced-new">Start a new session</button>
   </div>
 
   <div class="card hidden" id="full-card">
