@@ -1,6 +1,8 @@
-// pastecmd client. All content is AES-GCM encrypted with a key that lives in
-// the URL fragment and never reaches the server. Every ciphertext is bound to
-// its context via AAD ("clip"+sender+seq, "file-start"+sender+seq+fileId, or
+// pastecmd client. Content is AES-GCM encrypted with a session key that never
+// leaves the two devices: the joining device receives it through an ephemeral
+// ECDH exchange that the 6-character code authenticates, so the relay only
+// ever sees ciphertext. Every ciphertext is bound to its context via AES-GCM
+// AAD ("clip"+sender+seq, "file-start"+sender+seq+fileId, or
 // "chunk"+fileId+index) so a relay cannot replay one message as another,
 // re-deliver an old one, or reorder file chunks.
 // Server control messages (peer count) arrive prefixed with "\u0000"; the
@@ -40,29 +42,245 @@
     return b;
   };
 
-  // Session identity lives in the URL fragment: #<sessionId>.<key>
-  // The fragment is never sent to the server, so the key stays between devices.
-  // Exact lengths: a 9-byte ID and a 32-byte key, as the host generates. A
-  // malformed link (truncated by a scanner, say) starts a fresh session.
-  const MAX_PEERS = 8;
-  let sessionId, keyRaw, isHost, key;
-  const m = location.hash.match(/^#([A-Za-z0-9_-]{12})\.([A-Za-z0-9_-]{43})$/);
-  if (!m && location.hash) history.replaceState(null, "", location.pathname);
-  if (m) {
-    isHost = false;
-    sessionId = m[1];
-    keyRaw = b64url.decode(m[2]);
-  } else {
-    isHost = true;
-    sessionId = randomId(9);
-    // AES-256: symmetric-only crypto, so the construction is post-quantum
-    // resistant — Grover halves effective strength, leaving 128-bit margin.
-    keyRaw = crypto.getRandomValues(new Uint8Array(32));
+  // --- Pairing ------------------------------------------------------------
+  // A six-character code is the whole pairing secret. Both devices derive the
+  // same rendezvous ID from it with PBKDF2, so nothing has to be copied or
+  // scanned, and the code works from any network: only the derived ID ever
+  // reaches the server. The content key is separate — the host generates it
+  // randomly and hands it over through an ephemeral ECDH exchange that the
+  // code authenticates, so the key itself never travels on the wire.
+  const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const CODE_LEN = 6;
+  const CODE_RE = new RegExp(`^[${CODE_ALPHABET}]{${CODE_LEN}}$`);
+  // PBKDF2 stops the rendezvous ID from being an instant lookup of the ~2^30
+  // code space: without it, anyone who saw an ID could enumerate the code and
+  // MITM the handoff in milliseconds.
+  const CODE_ITERATIONS = 600_000;
+  const CODE_SALT = te.encode("pastecmd-pair-v1");
+  const randomCode = () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(CODE_LEN));
+    let s = "";
+    for (const b of bytes) s += CODE_ALPHABET[b % CODE_ALPHABET.length];
+    return s;
+  };
+  // 64 PBKDF2 bytes: 0-8 are the rendezvous ID (12 base64url characters, the
+  // exact length /ws/ routes on), 9-40 the HMAC key that authenticates the
+  // key handoff.
+  async function deriveCode(c) {
+    const base = await crypto.subtle.importKey("raw", te.encode(c), "PBKDF2", false, ["deriveBits"]);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt: CODE_SALT, iterations: CODE_ITERATIONS, hash: "SHA-256" },
+      base, 512));
+    return {
+      roomId: b64url.encode(bits.subarray(0, 9)),
+      authKey: await crypto.subtle.importKey("raw", bits.subarray(9, 41),
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]),
+    };
   }
-  await importSessionKey();
+  const normalizeCode = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+  const MAX_PEERS = 8;
+  // sessionId is the rendezvous ID derived from the code. keyRaw/key stay null
+  // on a joining device until the handoff completes.
+  let sessionId = null, keyRaw = null, key = null, isHost = false, code = null;
+  let authKey = null, paired = false;
+  let joinTries = 0;
+  // Hoisted so click handlers can reference them while the IIFE is still
+  // booting — they would otherwise hit the temporal dead zone.
+  let ws, expired = false, retryDelay = 500, peerCount = 1, generation = 0;
+  let inbox = Promise.resolve();
+  const statusEl = $("status"), statusText = $("status-text");
 
   async function importSessionKey() {
     key = await crypto.subtle.importKey("raw", keyRaw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+
+  // --- Per-tab reload recovery ---------------------------------------------
+  // The key is not in the URL any more, so a reloaded tab keeps its session
+  // (room, code and key) in sessionStorage. That store is per-tab: another
+  // tab or device still has to enter the code.
+  function saveRoom() {
+    try {
+      sessionStorage.setItem(`pastecmd-room-${sessionId}`, JSON.stringify({
+        code, host: isHost, key: b64url.encode(keyRaw),
+      }));
+      sessionStorage.setItem("pastecmd-current", sessionId);
+    } catch {}
+  }
+  function dropRoom() {
+    try {
+      sessionStorage.removeItem("pastecmd-current");
+      if (sessionId) sessionStorage.removeItem(`pastecmd-room-${sessionId}`);
+    } catch {}
+  }
+  async function restoreSession() {
+    let rec = null, roomId = null;
+    try {
+      roomId = sessionStorage.getItem("pastecmd-current");
+      rec = JSON.parse(sessionStorage.getItem(`pastecmd-room-${roomId}`) || "null");
+    } catch {}
+    if (!roomId || !rec || typeof rec.key !== "string" ||
+        !CODE_RE.test(String(rec.code || ""))) return false;
+    const d = await deriveCode(rec.code);
+    if (d.roomId !== roomId) return false; // stale record
+    const raw = b64url.decode(rec.key);
+    if (raw.length !== 32) return false;
+    code = rec.code;
+    sessionId = roomId;
+    authKey = d.authKey;
+    keyRaw = raw;
+    isHost = !!rec.host;
+    paired = true;
+    await importSessionKey();
+    return true;
+  }
+
+  // --- Handoff crypto ------------------------------------------------------
+  // The handoff authenticates both ends with the code (a relay that only
+  // knows the rendezvous ID cannot impersonate either side) and carries the
+  // content key inside an ECDH-derived key (so even someone who later learns
+  // the code cannot unwrap a recorded handoff).
+  const ECDH = { name: "ECDH", namedCurve: "P-256" };
+  const newPair = async () => {
+    const kp = await crypto.subtle.generateKey(ECDH, true, ["deriveBits"]);
+    return { kp, pub: new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)) };
+  };
+  const handoffAad = (transcript) => concatBytes(te.encode("pair-key"), transcript);
+  async function handoffKey(secret, transcript) {
+    const k = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({
+      name: "HKDF", hash: "SHA-256", salt: transcript,
+      info: te.encode("pastecmd-handoff-v1"),
+    }, k, 256);
+    return crypto.subtle.importKey("raw", bits, "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+  async function sharedSecret(privateKey, pub) {
+    const peer = await crypto.subtle.importKey("raw", pub, ECDH, false, []);
+    return new Uint8Array(await crypto.subtle.deriveBits(
+      { name: "ECDH", public: peer }, privateKey, 256));
+  }
+
+  let ephPair = null, ephPub = null;   // joiner's ephemeral pair
+  let hostPair = null, hostPub = null; // host's ephemeral pair, made on demand
+  let joinNonce = null, joinNonceB64 = null, pairTimer = 0;
+
+  async function sendPairJoin() {
+    if (isHost || paired || !authKey || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ephPair ||= await newPair();
+    ephPub ||= ephPair.pub;
+    joinNonce = crypto.getRandomValues(new Uint8Array(16));
+    joinNonceB64 = b64url.encode(joinNonce);
+    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", authKey,
+      concatBytes(te.encode("join"), ephPub, joinNonce)));
+    ws.send(JSON.stringify({
+      type: "pair-join", eph: b64url.encode(ephPub),
+      nonce: joinNonceB64, mac: b64url.encode(mac),
+    }));
+    // The relay may drop a frame; repeat the claim until the handoff lands.
+    clearTimeout(pairTimer);
+    const gen = generation;
+    pairTimer = setTimeout(() => {
+      if (gen === generation && !paired) sendPairJoin().catch(() => {});
+    }, 4000);
+  }
+
+  // Host: verify the claim before handing over the content key.
+  async function hostOnPairJoin(msg) {
+    if (!isHost || !authKey || !keyRaw) return;
+    let pub, nonce, mac;
+    try {
+      pub = b64url.decode(msg.eph);
+      nonce = b64url.decode(msg.nonce);
+      mac = b64url.decode(msg.mac);
+    } catch { return; }
+    if (pub.length !== 65 || nonce.length !== 16 || mac.length !== 32) return;
+    if (!await crypto.subtle.verify("HMAC", authKey, mac,
+      concatBytes(te.encode("join"), pub, nonce))) return;
+    hostPair ||= await newPair();
+    hostPub ||= hostPair.pub;
+    const transcript = concatBytes(hostPub, pub, nonce);
+    const handoff = await handoffKey(await sharedSecret(hostPair.kp.privateKey, pub), transcript);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = new Uint8Array(await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: handoffAad(transcript) }, handoff, keyRaw));
+    const hmac = new Uint8Array(await crypto.subtle.sign("HMAC", authKey,
+      concatBytes(te.encode("key"), transcript, iv, wrapped)));
+    ws.send(JSON.stringify({
+      type: "pair-key", eph: b64url.encode(hostPub), nonce: b64url.encode(nonce),
+      iv: b64url.encode(iv), data: b64url.encode(wrapped), mac: b64url.encode(hmac),
+    }));
+  }
+
+  // Joiner: check the host proved the code, then unwrap the content key.
+  async function joinerOnPairKey(msg) {
+    if (isHost || paired || !ephPair || !authKey || !ephPub) return;
+    let pub, nonce, iv, wrapped, mac;
+    try {
+      pub = b64url.decode(msg.eph);
+      nonce = b64url.decode(msg.nonce);
+      iv = b64url.decode(msg.iv);
+      wrapped = b64url.decode(msg.data);
+      mac = b64url.decode(msg.mac);
+    } catch { return; }
+    if (pub.length !== 65 || nonce.length !== 16 || iv.length !== 12 ||
+        wrapped.length !== 48 || mac.length !== 32) return;
+    if (msg.nonce !== joinNonceB64) return; // not for this handshake
+    const transcript = concatBytes(pub, ephPub, nonce);
+    if (!await crypto.subtle.verify("HMAC", authKey, mac,
+      concatBytes(te.encode("key"), transcript, iv, wrapped))) return;
+    const handoff = await handoffKey(await sharedSecret(ephPair.kp.privateKey, pub), transcript);
+    let raw;
+    try {
+      raw = new Uint8Array(await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv, additionalData: handoffAad(transcript) }, handoff, wrapped));
+    } catch { return; }
+    if (raw.length !== 32) return;
+    keyRaw = raw;
+    await importSessionKey();
+    paired = true;
+    clearTimeout(pairTimer);
+    saveRoom();
+    $("clip-card").classList.remove("hidden");
+    setStatus("linked", `Linked — ${Math.max(peerCount, 2)} devices`);
+    if (clip.value) await sendClip();
+  }
+
+  // --- Host / joiner setup -------------------------------------------------
+  async function startNewHost() {
+    isHost = true;
+    paired = true;
+    code = randomCode();
+    // AES-256: symmetric-only crypto, so the construction is post-quantum
+    // resistant — Grover halves effective strength, leaving 128-bit margin.
+    keyRaw = crypto.getRandomValues(new Uint8Array(32));
+    const d = await deriveCode(code);
+    sessionId = d.roomId;
+    authKey = d.authKey;
+    await importSessionKey();
+    saveRoom();
+    drawQR();
+    showHostUI();
+  }
+  async function joinWithCode(c) {
+    isHost = false;
+    paired = false;
+    code = c;
+    const d = await deriveCode(c);
+    sessionId = d.roomId;
+    authKey = d.authKey;
+    // A reloaded tab already holds this room's key; no handoff needed.
+    let rec = null;
+    try { rec = JSON.parse(sessionStorage.getItem(`pastecmd-room-${sessionId}`) || "null"); } catch {}
+    if (rec && rec.code === c && typeof rec.key === "string") {
+      const raw = b64url.decode(rec.key);
+      if (raw.length === 32) {
+        keyRaw = raw;
+        await importSessionKey();
+        paired = true;
+      }
+    }
+    if (!paired) setStatus("", "Pairing…");
+    $("clip-card").classList.remove("hidden");
   }
 
   // Device cap (host-controlled). Default: locked to 2 — pairing two devices is
@@ -70,9 +288,11 @@
   const allowMore = () => isHost && localStorage.getItem("pastecmd-allow-more") === "1";
   const maxDevices = () => allowMore() ? MAX_PEERS : 2;
 
-  // --- Host: show the QR code ---
+  // --- Host: the QR carries just the code ----------------------------------
+  // It is the same six characters as a short URL: scanning it opens this page
+  // and joins. There is no long link to copy anywhere.
   function drawQR() {
-    const shareUrl = `${location.origin}/#${sessionId}.${b64url.encode(keyRaw)}`;
+    const shareUrl = `${location.origin}/#${code}`;
     const qr = qrcode(0, "M");
     qr.addData(shareUrl);
     qr.make();
@@ -92,7 +312,6 @@
       }
     }
     $("qr-holder").replaceChildren(canvas);
-    $("copy-link").onclick = () => copyText(shareUrl, $("copy-link"), "Copy link");
   }
 
   // Once linked, collapse the QR behind a toggle: it stops dominating the page
@@ -110,26 +329,100 @@
     qrToggle.textContent = "Show QR code";
   }
 
-  if (isHost) {
-    drawQR();
+  // --- Host UI wiring ------------------------------------------------------
+  function showHostUI() {
+    $("code-host-text").textContent = code;
+    $("code-host-copy").onclick = () => copyText(code, $("code-host-copy"), "Copy code");
     $("allow-more-wrap").classList.remove("hidden");
     const allowBox = $("allow-more");
     allowBox.checked = allowMore();
     allowBox.onchange = async () => {
-      // Changing the cap needs a fresh session: the server locks the cap on the
-      // creator's first connect, so we regenerate identity and re-pair.
+      // Changing the cap needs a fresh room: the server locks the cap on the
+      // creator's first connect, so a new code (and key) is generated.
       localStorage.setItem("pastecmd-allow-more", allowBox.checked ? "1" : "0");
-      sessionId = randomId(9);
-      keyRaw = crypto.getRandomValues(new Uint8Array(32));
-      await importSessionKey();
-      drawQR();
       generation++;
       try { if (ws) ws.close(); } catch {}
+      dropRoom();
+      await startNewHost();
       connect();
     };
     $("qr-card").classList.remove("hidden");
+    $("clip-card").classList.remove("hidden");
   }
-  $("clip-card").classList.remove("hidden");
+
+  // --- Mode tabs: "New session" vs "Enter code" -----------------------------
+  async function selectMode(mode) {
+    $("mode-tab-new").setAttribute("aria-selected", String(mode === "new"));
+    $("mode-tab-enter").setAttribute("aria-selected", String(mode === "enter"));
+    if (mode === "enter") {
+      // Discard the host identity minted on boot — we are going to join.
+      generation++;
+      try { ws && ws.close(); } catch {}
+      dropRoom();
+      isHost = false;
+      paired = false;
+      sessionId = null;
+      keyRaw = null;
+      key = null;
+      $("mode-tabs").classList.add("hidden");
+      $("qr-card").classList.add("hidden");
+      $("allow-more-wrap").classList.add("hidden");
+      $("clip-card").classList.add("hidden");
+      $("code-join-missing").classList.add("hidden");
+      $("code-join-card").classList.remove("hidden");
+      setStatus("", "Enter the code shown on the other screen");
+    } else {
+      $("mode-tabs").classList.add("hidden");
+      $("code-join-card").classList.add("hidden");
+      await startNewHost();
+      connect();
+    }
+  }
+  const enterCodeInput = $("code-join-input");
+  const showJoinError = (text) => {
+    const el = $("code-join-missing");
+    el.textContent = text;
+    el.classList.remove("hidden");
+  };
+  $("mode-tab-new").onclick = () => selectMode("new");
+  $("mode-tab-enter").onclick = () => selectMode("enter");
+  $("code-join-back").onclick = () => selectMode("new");
+  $("code-join-submit").onclick = async () => {
+    const c = normalizeCode(enterCodeInput.value);
+    $("code-join-missing").classList.add("hidden");
+    if (!CODE_RE.test(c)) {
+      showJoinError(`That is not a ${CODE_LEN}-character code — check the other screen.`);
+      return;
+    }
+    enterCodeInput.value = "";
+    $("code-join-card").classList.add("hidden");
+    await joinWithCode(c);
+    connect();
+  };
+  enterCodeInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("code-join-submit").click();
+  });
+
+  // --- Boot ----------------------------------------------------------------
+  // A scanned QR arrives as #<code>. Anything else in the fragment is a stale
+  // link from the old scheme, so it is dropped.
+  const hashCode = normalizeCode(location.hash.slice(1));
+  if (location.hash && !CODE_RE.test(hashCode)) {
+    history.replaceState(null, "", location.pathname);
+  }
+  if (CODE_RE.test(hashCode)) {
+    $("mode-tabs").classList.add("hidden");
+    $("clip-card").classList.add("hidden");
+    setStatus("", "Pairing…");
+    await joinWithCode(hashCode);
+  } else if (await restoreSession()) {
+    // Reloaded tab: same room and code, straight back in.
+    if (isHost) { drawQR(); showHostUI(); }
+    else $("clip-card").classList.remove("hidden");
+  } else {
+    $("mode-tabs").classList.remove("hidden");
+    await startNewHost();
+  }
 
   // --- Crypto: AES-GCM with per-message random IV and context-binding AAD ---
   async function encryptBytes(bytes, aad) {
@@ -193,7 +486,6 @@
   }
 
   // --- Status UI ---
-  const statusEl = $("status"), statusText = $("status-text");
   function setStatus(cls, text) {
     statusEl.className = cls;
     statusText.textContent = text;
@@ -216,10 +508,9 @@
 
   // --- WebSocket ---
   const clip = $("clip");
-  let ws, expired = false, retryDelay = 500, peerCount = 1, generation = 0;
-  let inbox = Promise.resolve(); // tail of the serialized message-handling chain
 
   function connect() {
+    if (!sessionId) return; // "Enter code" chosen, code not yet entered
     const gen = generation;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     // Host advertises the cap; the server only honors it from the first (host)
@@ -230,9 +521,16 @@
 
     ws.onopen = async () => {
       retryDelay = 500;
-      setStatus("", isHost ? "Waiting for your phone to scan…" : "Connected");
+      joinTries = 0;
+      if (!paired) {
+        // Joining: claim the room and wait for the key handoff.
+        setStatus("", "Pairing…");
+        await sendPairJoin();
+        return;
+      }
+      setStatus("", isHost ? "Waiting for a device to enter the code…" : "Connected");
       // Late joiner should receive whatever is already in the box.
-      if (clip.value) await sendClip();
+      if (clip.value && key) await sendClip();
     };
 
     // Handle messages strictly one at a time, in arrival order. An async
@@ -246,6 +544,24 @@
 
     ws.onclose = (ev) => {
       if (gen !== generation) return; // superseded (regenerated, or ended)
+      // A joining device may get here before the host has claimed the room —
+      // the relay answers "expired" until it is created with ?max. Keep
+      // trying briefly instead of declaring the session over.
+      if (ev.reason === "expired" && !isHost && !paired) {
+        if (++joinTries <= 15) {
+          setStatus("dead", "Waiting for the other device…");
+          setTimeout(() => { if (gen === generation && !paired) connect(); }, 2000);
+          return;
+        }
+        generation++;
+        try { ws.close(); } catch {}
+        setStatus("dead", "No device answered that code");
+        $("clip-card").classList.add("hidden");
+        $("code-join-card").classList.remove("hidden");
+        showJoinError("No device answered that code. Check the characters and " +
+          "try again — the code only works while the other screen is open.");
+        return;
+      }
       if (TERMINAL.has(ev.reason)) return endSession(ev.reason);
       setStatus("dead", "Reconnecting…");
       setTimeout(() => { if (gen === generation) connect(); }, retryDelay);
@@ -261,6 +577,9 @@
     try { ws.close(); } catch {}
     if (reason === "expired") {
       expired = true;
+      dropRoom();
+      $("mode-tabs").classList.add("hidden");
+      $("code-join-card").classList.add("hidden");
       $("qr-card").classList.add("hidden");
       $("clip-card").classList.add("hidden");
       $("expired-card").classList.remove("hidden");
@@ -273,6 +592,7 @@
       // The same tab reconnected elsewhere — in practice a duplicated tab,
       // which carries a copy of this one's sessionStorage. Stand down rather
       // than fight over the slot.
+      dropRoom();
       $("qr-card").classList.add("hidden");
       $("clip-card").classList.add("hidden");
       $("replaced-card").classList.remove("hidden");
@@ -291,8 +611,16 @@
         endSession(msg.reason);
       } else if (msg.type === "peers") {
         peerCount = msg.count;
-        if (msg.count >= 2) setStatus("linked", `Linked — ${msg.count} devices`);
-        else setStatus("", isHost ? "Waiting for your phone to scan…" : "Other device disconnected");
+        if (!paired) {
+          // Joining device: the slot is taken, but the key has not arrived.
+          setStatus(msg.count >= 2 ? "linked" : "", msg.count >= 2
+            ? "Pairing…" : "Waiting for the other device…");
+        } else if (msg.count >= 2) {
+          setStatus("linked", `Linked — ${msg.count} devices`);
+        } else {
+          setStatus("", isHost
+            ? "Waiting for a device to enter the code…" : "Other device disconnected");
+        }
         setQrLinked(msg.count >= 2);
         // Alone again: any half-received file can never complete — say so
         // instead of leaving its progress bar hanging forever.
@@ -306,6 +634,12 @@
 
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    // Pairing handshake: plaintext framing, authenticated by HMACs keyed with
+    // the code. They are only meaningful to a host and a device that knows
+    // the same six characters.
+    if (msg.type === "pair-join") { await hostOnPairJoin(msg); return; }
+    if (msg.type === "pair-key") { await joinerOnPairKey(msg); return; }
+    if (!key) return; // nothing sealed can be read before the handoff
     if (msg.type === "clip") {
       try {
         const pt = await openSealed(msg);
@@ -342,6 +676,7 @@
   // letting an oversized clip silently never arrive.
   const MAX_CLIP_BYTES = 700_000;
   function sendClip() {
+    if (!key) return Promise.resolve(); // not paired yet
     const bytes = te.encode(clip.value);
     const tooBig = bytes.length > MAX_CLIP_BYTES;
     $("clip-too-big").classList.toggle("hidden", !tooBig);
@@ -352,7 +687,7 @@
   clip.addEventListener("input", () => {
     clearTimeout(debounce);
     debounce = setTimeout(async () => {
-      if (ws && ws.readyState === WebSocket.OPEN && !expired) await sendClip();
+      if (ws && ws.readyState === WebSocket.OPEN && !expired && key) await sendClip();
     }, 200);
   });
 
@@ -442,7 +777,8 @@
 
   async function sendFile(file, row) {
     if (file.size > MAX_FILE_BYTES) return row.fail("Too big — 50 MB max");
-    if (peerCount < 2) return row.fail("No other device connected — scan the QR first");
+    if (!key) return row.fail("Not paired yet — connect first");
+    if (peerCount < 2) return row.fail("No other device connected — enter the code first");
     if (!ws || ws.readyState !== WebSocket.OPEN) return row.fail("Not connected");
 
     const fileId = crypto.getRandomValues(new Uint8Array(4));
