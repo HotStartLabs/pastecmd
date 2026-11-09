@@ -58,6 +58,7 @@ class El {
   }
   set className(v) { this.classList = new ClassList(v.split(/\s+/).filter(Boolean)); }
   get className() { return [...this.classList.s].join(" "); }
+  setAttribute() {} removeAttribute() {}
   append(...c) { for (const x of c) { x.parent = this; this.children.push(x); } }
   prepend(...c) { for (const x of c.reverse()) { x.parent = this; this.children.unshift(x); } }
   remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); }
@@ -72,7 +73,7 @@ class El {
   click() {}
 }
 
-function makeClient(hash, { allowMore = false } = {}) {
+function makeClient(hash, { allowMore = false, sessionStore = null } = {}) {
   const byId = new Map();
   for (const m of html.matchAll(/<(\w+)([^>]*?)\bid="([^"]+)"([^>]*)>/g)) {
     const el = new El(m[1], m[3]);
@@ -82,8 +83,13 @@ function makeClient(hash, { allowMore = false } = {}) {
   }
   const expiredBtn = new El("button");
   const store = () => { const m = new Map(); return {
-    getItem: (k) => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), _m: m }; };
-  const localStorage = store(), sessionStorage = store();
+    getItem: (k) => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k), _m: m }; };
+  // localStorage is shared by everything on one machine, but the pairing no
+  // longer depends on it (the code is the rendezvous). sessionStorage is
+  // per-tab and only carries reload recovery; pass `sessionStore` to model a
+  // tab reloading with the same store.
+  const localStorage = store(), sessionStorage = sessionStore || store();
   if (allowMore) localStorage.setItem("pastecmd-allow-more", "1");
   const location = { hash, origin: BASE, host: `localhost:${PORT}`, protocol: "http:", pathname: "/", href: BASE + "/" + hash };
   const history = { replaceState: (_s, _t, url) => { location.hash = ""; location.href = BASE + url; } };
@@ -97,15 +103,37 @@ function makeClient(hash, { allowMore = false } = {}) {
   const navigator = { clipboard: { writeText: async (t) => { copied.push(t); }, readText: async () => "" } };
   const window = { addEventListener() {} };
   const errors = [];
+  // Capture what the QR actually encodes, so a test can prove it carries the
+  // six-character code and nothing else.
+  const qrData = [];
+  const qrcodeCapture = (...a) => {
+    const q = qrcode(...a);
+    const add = q.addData.bind(q);
+    q.addData = (d) => { qrData.push(d); return add(d); };
+    return q;
+  };
   const run = new Function("document", "location", "history", "localStorage", "sessionStorage",
     "window", "navigator", "qrcode", "Event", appSrc.replace(/\}\)\(\);\s*$/, "})().catch((e) => __err(e));").replace(/^/, "const __err = arguments[9];\n"));
-  run(document, location, history, localStorage, sessionStorage, window, navigator, qrcode,
+  run(document, location, history, localStorage, sessionStorage, window, navigator, qrcodeCapture,
     class Event { constructor(t) { this.type = t; } }, (e) => errors.push(e));
   const $ = (id) => byId.get(id);
   return {
-    $, errors, sessionStorage, location,
+    $, errors, localStorage, sessionStorage, location, qrData,
     status: () => $("status-text").textContent,
-    async shareUrl() { $("copy-link").onclick(); await until(() => copied.length, 1000, "copy"); return copied.at(-1); },
+    code: () => $("code-host-text") ? $("code-host-text").textContent : null,
+    async copyCode() {
+      $("code-host-copy").onclick();
+      await until(() => copied.length, 1000, "copy");
+      return copied.at(-1);
+    },
+    async enterCode(c) {
+      // Wait for the client to finish booting (host boot: the socket opens and
+      // the status shows "Waiting"). Then switch to "Enter code" and submit.
+      await until(() => this.status().startsWith("Waiting"), 5000, "client booted");
+      this.$("mode-tab-enter").onclick();
+      this.$("code-join-input").value = c;
+      this.$("code-join-submit").onclick();
+    },
     type(text) { $("clip").value = text; $("clip").dispatchEvent({ type: "input" }); },
     sendFiles(files) { $("file-input").files = files; $("file-input").onchange(); },
     rows: () => $("transfers").children,
@@ -130,8 +158,61 @@ const b64 = {
 };
 const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
 const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n); return b; };
-async function attackerCrypto(fragment) {
-  const keyRaw = b64.dec(fragment.split(".")[1]);
+
+// Mirrors deriveCode() in public/app.js: PBKDF2 over the code with the same
+// salt and iteration count, split into the 12-char rendezvous ID and the
+// HMAC key that authenticates the handoff. Keep in sync with the client.
+async function codeParts(code) {
+  const base = await crypto.subtle.importKey("raw", te.encode(code), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: te.encode("pastecmd-pair-v1"), iterations: 600_000, hash: "SHA-256" },
+    base, 512));
+  return { roomId: b64.enc(bits.subarray(0, 9)), authBits: bits.subarray(9, 41) };
+}
+
+// Performs the joiner half of the key handoff on a raw socket: claims the
+// room with the code, verifies the host proved the same code, and returns the
+// unwrapped content key. This is how an attacker who *knows* the code gets in,
+// and it is what the hostile-peer tests need in order to seal messages.
+async function pairRaw(sock, code) {
+  const { authBits } = await codeParts(code);
+  const authKey = await crypto.subtle.importKey("raw", authBits,
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const pub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+  const nonce = crypto.getRandomValues(new Uint8Array(16));
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", authKey,
+    cat(te.encode("join"), pub, nonce)));
+  sock.ws.send(JSON.stringify({
+    type: "pair-join", eph: b64.enc(pub), nonce: b64.enc(nonce), mac: b64.enc(mac),
+  }));
+  let msg;
+  await until(() => (msg = sock.got
+    .filter((m) => typeof m === "string" && !m.startsWith("\u0000"))
+    .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+    .find((x) => x && x.type === "pair-key")), 8000, "pair-key");
+  const hostPub = b64.dec(msg.eph), rnonce = b64.dec(msg.nonce);
+  const iv = b64.dec(msg.iv), wrapped = b64.dec(msg.data), hmac = b64.dec(msg.mac);
+  const transcript = cat(hostPub, pub, rnonce);
+  const ok = await crypto.subtle.verify("HMAC", authKey, hmac,
+    cat(te.encode("key"), transcript, iv, wrapped));
+  if (!ok) throw new Error("host failed to prove the code");
+  const peer = await crypto.subtle.importKey("raw", hostPub,
+    { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const secret = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "ECDH", public: peer }, kp.privateKey, 256));
+  const hk = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({
+    name: "HKDF", hash: "SHA-256", salt: transcript,
+    info: te.encode("pastecmd-handoff-v1"),
+  }, hk, 256);
+  const handoff = await crypto.subtle.importKey("raw", bits, "AES-GCM", false, ["decrypt"]);
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData: cat(te.encode("pair-key"), transcript) },
+    handoff, wrapped));
+}
+
+async function attackerCrypto(keyRaw) {
   const key = await crypto.subtle.importKey("raw", keyRaw, "AES-GCM", false, ["encrypt", "decrypt"]);
   const dev = crypto.getRandomValues(new Uint8Array(8));
   let seq = 0;
@@ -155,7 +236,6 @@ const blobOf = async (row) => {
   const a = row.find("a"); if (!a) return null;
   return resolveObjectURL(a.href);
 };
-const fragOf = (url) => url.split("#")[1];
 const rid = () => b64.enc(crypto.getRandomValues(new Uint8Array(9)));
 
 // ================= tests =================
@@ -190,11 +270,12 @@ await test("server: Upgrade header matched case-insensitively", async () => {
 });
 
 // ---- two-device session via the real client ----
+// The joiner only ever gets the six-character code — no URL, no key.
 const host = makeClient("");
-await until(() => host.status().startsWith("Waiting"), 5000, "host connect");
-const url = await host.shareUrl();
-const frag = fragOf(url);
-const joiner = makeClient("#" + frag);
+await until(() => host.status().startsWith("Waiting") && host.code(), 15000, "host connect");
+const code = host.code();
+const { roomId: sid } = await codeParts(code);
+const joiner = makeClient("#" + code);
 
 await test("client: host and joiner link (2 devices)", async () => {
   await until(() => host.status() === "Linked — 2 devices" && joiner.status() === "Linked — 2 devices", 5000, "linked");
@@ -239,13 +320,12 @@ await test("client: multi-chunk file transfer, exact bytes, octet-stream downloa
 });
 
 await test("server: third device turned away when session is full", async () => {
-  const s = raw(`/ws/${frag.split(".")[0]}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
+  const s = raw(`/ws/${sid}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
   const c = await s.closed;
   assert(c.code === 4001 && c.reason === "full", `got ${c.code} ${c.reason}`);
 });
 
 await test("server: same rejoin token replaces its old socket (no false 'full')", async () => {
-  const sid = frag.split(".")[0];
   const tok = joiner.sessionStorage.getItem(`pastecmd-t-${sid}`);
   assert(tok && tok.length === 22, "joiner token missing");
   const s = raw(`/ws/${sid}?t=${tok}`);
@@ -258,16 +338,19 @@ await test("server: same rejoin token replaces its old socket (no false 'full')"
 
 // ---- multi-user session: attacker holds the key and a slot ----
 const host2 = makeClient("", { allowMore: true });
-await until(() => host2.status().startsWith("Waiting"), 5000, "host2 connect");
-const frag2 = fragOf(await host2.shareUrl());
-const sid2 = frag2.split(".")[0];
-const joiner2 = makeClient("#" + frag2);
-await until(() => joiner2.status().startsWith("Linked"), 5000, "joiner2 linked");
+await until(() => host2.status().startsWith("Waiting") && host2.code(), 15000, "host2 connect");
+const code2 = host2.code();
+const { roomId: sid2 } = await codeParts(code2);
+const joiner2 = makeClient("#" + code2);
+await until(() => joiner2.status().startsWith("Linked"), 15000, "joiner2 linked");
 const evil = raw(`/ws/${sid2}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
 await evil.opened;
+// The test knows the code, so this socket can complete the handoff and then
+// play a hostile peer that legitimately holds the key.
+const evilKey = await pairRaw(evil, code2);
 const spy = raw(`/ws/${sid2}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
 await spy.opened;
-const A = await attackerCrypto(frag2);
+const A = await attackerCrypto(evilKey);
 const peersMsgs = (s) => s.got.filter((m) => typeof m === "string" && !m.startsWith("\u0000"));
 
 await test("replay: relay re-sending an older clip does not roll the box back", async () => {
@@ -361,6 +444,139 @@ await test("relay: control-prefixed and >1 MB UTF-8 strings are not relayed", as
 
 await test("no uncaught client errors", async () => {
   const errs = [...host.errors, ...joiner.errors, ...host2.errors, ...joiner2.errors];
+  assert(!errs.length, errs.map(String).join("; "));
+});
+
+// ================= pairing-code tests =================
+// The code alone is the pairing secret: no shared storage, no URL, no key.
+// Each client below has its own localStorage and sessionStorage, which is
+// exactly what two different devices (or two different networks) look like.
+const store = () => {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+    _m: m,
+  };
+};
+
+await test("code: host mints a 6-char code and the QR carries only #code", async () => {
+  const h = makeClient("");
+  await until(() => h.code(), 15000, "host code");
+  const c = h.code();
+  assert(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/.test(c), `bad code ${c}`);
+  // The QR must be the short URL with the code only — no session id, no key.
+  await until(() => h.qrData.length > 0, 3000, "qr data");
+  assert(h.qrData[0] === `${BASE}/#${c}`, `qr content ${h.qrData[0]}`);
+  assert((await h.copyCode()) === c, "copy button copies more than the code");
+});
+
+await test("code: a separate device joins by typing the code (no shared storage)", async () => {
+  const h = makeClient("");
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host A");
+  const c = h.code();
+  // A different machine: its own localStorage/sessionStorage, and the only
+  // thing it has is the six characters.
+  const j = makeClient("");
+  await j.enterCode(c);
+  await until(() => h.status() === "Linked — 2 devices" &&
+                j.status() === "Linked — 2 devices", 15000, "linked by code");
+  h.type("across devices");
+  await until(() => j.$("clip").value === "across devices", 5000, "clip by code");
+  j.type("and back");
+  await until(() => h.$("clip").value === "and back", 5000, "clip back");
+});
+
+await test("code: scanning the #code URL joins too", async () => {
+  const h = makeClient("");
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host B");
+  const c = h.code();
+  const j = makeClient("#" + c); // what the camera opens
+  await until(() => h.status() === "Linked — 2 devices" &&
+                j.status() === "Linked — 2 devices", 15000, "linked by QR");
+});
+
+await test("code: the content key never appears in relayed frames", async () => {
+  const h = makeClient("", { allowMore: true });
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host C");
+  const c = h.code();
+  const { roomId } = await codeParts(c);
+  const spy = raw(`/ws/${roomId}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
+  await spy.opened;
+  const j = makeClient("#" + c);
+  // The spy counts as a peer too, so the room is 3 devices here.
+  await until(() => j.status().startsWith("Linked"), 15000, "joiner C");
+  // Learn the key the only way a device can: by proving the code.
+  const peek = raw(`/ws/${roomId}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
+  await peek.opened;
+  const keyRaw = await pairRaw(peek, c);
+  assert(keyRaw.length === 32, "unexpected key length");
+  const keyStr = b64.enc(keyRaw);
+  for (const m of spy.got) {
+    if (typeof m !== "string") continue;
+    assert(!m.includes(keyStr), "raw content key was relayed");
+  }
+});
+
+await test("code: a wrong code cannot obtain the key", async () => {
+  const h = makeClient("", { allowMore: true });
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host D");
+  const c = h.code();
+  const { roomId } = await codeParts(c);
+  const s = raw(`/ws/${roomId}?t=${b64.enc(crypto.getRandomValues(new Uint8Array(16)))}`);
+  await s.opened;
+  // Same room, but the MAC is keyed with a different code: knowing the room
+  // (which the server does) must not be enough to get the content key.
+  const { authBits } = await codeParts("ZZZZZZ");
+  const authKey = await crypto.subtle.importKey("raw", authBits,
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const pub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+  const nonce = crypto.getRandomValues(new Uint8Array(16));
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", authKey,
+    cat(te.encode("join"), pub, nonce)));
+  s.ws.send(JSON.stringify({
+    type: "pair-join", eph: b64.enc(pub), nonce: b64.enc(nonce), mac: b64.enc(mac) }));
+  await sleep(1500);
+  const gotKey = s.got.some((m) => typeof m === "string" && m.includes("\"pair-key\""));
+  assert(!gotKey, "host handed the key to a device that did not know the code");
+});
+
+await test("code: a reloaded tab rejoins without retyping the code", async () => {
+  const h = makeClient("");
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host E");
+  const c = h.code();
+  const tabStore = store();
+  const j = makeClient("#" + c, { sessionStore: tabStore });
+  await until(() => j.status() === "Linked — 2 devices", 15000, "joiner E");
+  j.type("before reload");
+  await until(() => h.$("clip").value === "before reload", 5000, "sync before reload");
+  // Same tab reloaded: empty hash, same sessionStorage, no code typed.
+  const j2 = makeClient("", { sessionStore: tabStore });
+  await until(() => j2.$("clip").value === "before reload" ||
+                j2.status().startsWith("Linked"), 15000, "reloaded tab");
+  await until(() => j2.status().startsWith("Linked"), 15000, "reloaded tab linked");
+  h.type("after reload");
+  await until(() => j2.$("clip").value === "after reload", 5000, "sync after reload");
+});
+
+await test("code: a third device with the code is turned away as full", async () => {
+  const h = makeClient("");
+  await until(() => h.status().startsWith("Waiting") && h.code(), 15000, "host F");
+  const c = h.code();
+  const j1 = makeClient("");
+  await j1.enterCode(c);
+  await until(() => h.status() === "Linked — 2 devices", 15000, "joiner F");
+  const j2 = makeClient("");
+  await j2.enterCode(c);
+  await until(() => j2.visible("full-card"), 15000, "full card for third device");
+});
+
+await test("code: no uncaught client errors in the code flow", async () => {
+  const errs = [
+    ...(makeClient("", { allowMore: false }).errors),
+  ];
   assert(!errs.length, errs.map(String).join("; "));
 });
 

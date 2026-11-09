@@ -67,7 +67,63 @@ main {
 #qr-holder canvas { width: 220px; height: 220px; display: block; }
 .hint { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
 .hint.warn { color: var(--warn); }
-#copy-link { margin-top: 12px; }
+
+.mode-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin: 0 auto 4px;
+}
+.mode-tab {
+  border: none;
+  background: transparent;
+  padding: 8px 14px;
+  font-size: 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.mode-tab[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.code-text {
+  font: 600 40px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 8px;
+  color: var(--accent);
+  margin: 12px 0 4px;
+}
+.code-input-label {
+  display: block;
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+#code-join-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  font: 600 28px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 6px;
+  text-align: center;
+  text-transform: uppercase;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+#code-join-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+#code-host { margin-top: 16px; }
+#code-join-back { margin-top: 10px; }
 
 .top-row {
   display: flex;

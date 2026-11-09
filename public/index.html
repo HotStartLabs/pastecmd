@@ -17,11 +17,29 @@
 </header>
 
 <main>
+  <div class="mode-tabs" id="mode-tabs">
+    <button id="mode-tab-new" class="mode-tab">New session</button>
+    <button id="mode-tab-enter" class="mode-tab">Connect Partner</button>
+  </div>
+
+  <div class="card hidden" id="code-join-card">
+    <label class="code-input-label" for="code-join-input">Type the 6-character code shown on the other screen</label>
+    <input type="text" id="code-join-input" maxlength="6" placeholder="ABC123"
+      autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text">
+    <button class="primary" id="code-join-submit">Connect</button>
+    <p class="hint hidden" id="code-join-missing"></p>
+    <button id="code-join-back" class="linklike">Start a new session instead</button>
+  </div>
+
   <div class="card hidden" id="qr-card">
     <div id="qr-body">
       <div id="qr-holder"></div>
-      <p class="hint">Scan with your phone camera to link it to this page.</p>
-      <button id="copy-link">Copy link</button>
+      <p class="hint">Scan with the other device's camera — or type the code below there.</p>
+      <div id="code-host">
+        <p class="code-text" id="code-host-text"></p>
+        <button id="code-host-copy">Copy code</button>
+        <p class="hint">Works from any network. The key never leaves these two devices.</p>
+      </div>
     </div>
     <button id="qr-toggle" class="linklike hidden">Show QR code</button>
   </div>
