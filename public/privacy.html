@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — pastecmd</title>
+<meta name="description" content="pastecmd does not store what you paste or send, has no accounts, and uses no analytics, ads or tracking cookies. Content is end-to-end encrypted.">
+<link rel="canonical" href="https://pastecmd.com/privacy">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1><a href="/" class="home">paste<span class="accent">cmd</span></a></h1>
+  <p class="tagline">Privacy policy &middot; last updated November 21, 2026</p>
+</header>
+
+<main class="doc">
+  <h2>In short</h2>
+  <p>pastecmd doesn't keep what you paste or send, can't read it, and doesn't
+  know who you are. There are no accounts, no analytics, no ads and no
+  tracking cookies.</p>
+
+  <h2>What you send</h2>
+  <p>Text and files are encrypted in your browser with AES-256-GCM before they
+  leave your device. The key is in the part of the link after the
+  <code>#</code>, which browsers never send to a server. The relay passes the
+  encrypted data to the other devices in your session as it arrives and never
+  saves it. Filenames are encrypted too.</p>
+
+  <h2>What the server keeps</h2>
+  <p>For each session, the relay stores only its random ID and the
+  device limit (2 or 8) while it's active. All of it is deleted when the
+  session ends after 10 minutes with no activity.</p>
+
+  <h2>Network data</h2>
+  <p>pastecmd runs on <a href="https://www.cloudflare.com/privacypolicy/" rel="noopener">Cloudflare</a>.
+  Like any website, its network sees your IP address and basic request details
+  (such as your browser type) to deliver the page, protect it from abuse, and
+  apply rate limits. pastecmd doesn't add to that data, sell it, or use it to
+  identify you.</p>
+
+  <h2>Stored in your browser</h2>
+  <ul>
+    <li>Whether you turned on "Allow Multiple Users" (local storage on the
+      computer that starts sessions).</li>
+    <li>A random token that lets a tab reconnect to its own session after a
+      reload (session storage, which is cleared when the tab closes).</li>
+  </ul>
+  <p>Neither is sent anywhere for tracking, and you can clear both in your
+  browser settings.</p>
+
+  <h2>Third parties</h2>
+  <p>The page loads one outside image: an integrity badge from
+  <a href="https://codecanary.org" rel="noopener">codecanary.org</a> that
+  confirms the site's code matches what was published. No other outside
+  scripts, fonts or trackers load. The site's Content-Security-Policy blocks them.</p>
+
+  <h2>Children</h2>
+  <p>pastecmd doesn't collect personal information from anyone, including
+  children.</p>
+
+  <h2>Changes and contact</h2>
+  <p>If this policy changes, the date at the top will change with it. The
+  code, including the full security model, is public at
+  <a href="https://github.com/HotStartLabs/pastecmd" rel="noopener">github.com/HotStartLabs/pastecmd</a>.
+  Questions: <a href="mailto:security@pastecmd.com">security@pastecmd.com</a>.</p>
+</main>
+
+<footer><a href="/">Start a session</a> &middot; <a href="/about">About</a> &middot; <a href="https://github.com/HotStartLabs/pastecmd" rel="noopener">Source</a></footer>
+</body>
+</html>

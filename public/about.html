@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About pastecmd — copy &amp; paste between your phone and computer</title>
+<meta name="description" content="pastecmd is a free, open-source tool for copying text and files between your phone and computer. Scan a QR code, no install or account, end-to-end encrypted.">
+<link rel="canonical" href="https://pastecmd.com/about">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1><a href="/" class="home">paste<span class="accent">cmd</span></a></h1>
+  <p class="tagline">Copy &amp; paste between your phone and computer. Nothing to install.</p>
+</header>
+
+<main class="doc">
+  <h2>What it is</h2>
+  <p>pastecmd is a free web tool for moving text, links, commands and files
+  between your own devices. Open pastecmd.com on your computer, scan the QR
+  code with your phone's camera, and anything you type or paste on one device
+  shows up on the other right away. There's nothing to install and no account
+  to make.</p>
+  <p>It's built for everyday chores: getting a link from your phone onto your
+  laptop, sending a terminal command from a desktop to a phone, or moving a
+  screenshot or PDF between devices without emailing it to yourself.</p>
+
+  <h2>How it works</h2>
+  <ul>
+    <li>Your computer makes a random session and a secret key and puts both in
+      the QR code. The key sits in the URL fragment (after the <code>#</code>),
+      which browsers never send to a server.</li>
+    <li>Both devices connect to a small relay on Cloudflare's network. Everything
+      you send is encrypted in your browser with AES-256-GCM first, so the relay
+      only ever sees ciphertext and can't read it.</li>
+    <li>Files up to 50&nbsp;MB are split into encrypted chunks and sent through
+      the same relay. Nothing is written to disk.</li>
+    <li>A session holds 2 devices by default (up to 8 if you allow it), and it
+      ends after 10 minutes with no activity.</li>
+  </ul>
+
+  <h2>FAQ</h2>
+  <dl>
+    <dt>Is it free?</dt>
+    <dd>Yes. There are no ads, no accounts and no paid tier.</dd>
+
+    <dt>Do you store what I paste?</dt>
+    <dd>No. Text and files go from one device to the other through the relay
+      and are never saved. The server can't decrypt them anyway. See the
+      <a href="/privacy">privacy policy</a>.</dd>
+
+    <dt>What does it work on?</dt>
+    <dd>Any recent browser: Chrome, Edge, Firefox or Safari, on Windows, macOS,
+      Linux, iPhone or Android.</dd>
+
+    <dt>How much can I send?</dt>
+    <dd>About 700&nbsp;KB of text, or files up to 50&nbsp;MB each.</dd>
+
+    <dt>Can someone else join my session?</dt>
+    <dd>Only someone who has the link or sees the QR code. The device counter on
+      the page shows how many devices are connected. If it's higher than you
+      expect, start a new session.</dd>
+
+    <dt>Is the code public?</dt>
+    <dd>Yes. pastecmd is open source under the MIT license:
+      <a href="https://github.com/HotStartLabs/pastecmd" rel="noopener">github.com/HotStartLabs/pastecmd</a>.
+      The README describes the full security model.</dd>
+
+    <dt>Who makes it?</dt>
+    <dd>HotStart Labs, the makers of
+      <a href="https://passburn.com" rel="noopener">passburn.com</a>.</dd>
+
+    <dt>How do I report a security problem?</dt>
+    <dd>Email <a href="mailto:security@pastecmd.com">security@pastecmd.com</a>
+      (see <a href="/.well-known/security.txt">security.txt</a>). For bugs and
+      feature ideas, open an issue on
+      <a href="https://github.com/HotStartLabs/pastecmd/issues" rel="noopener">GitHub</a>.</dd>
+  </dl>
+</main>
+
+<footer><a href="/">Start a session</a> &middot; <a href="/privacy">Privacy</a> &middot; <a href="https://github.com/HotStartLabs/pastecmd" rel="noopener">Source</a></footer>
+</body>
+</html>
